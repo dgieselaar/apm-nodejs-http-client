@@ -14,6 +14,8 @@ const StreamChopper = require('stream-chopper')
 const ndjson = require('./lib/ndjson')
 const truncate = require('./lib/truncate')
 const pkg = require('./package')
+const FormData = require('form-data')
+const merge = require('lodash/merge')
 
 module.exports = Client
 
@@ -47,13 +49,14 @@ util.inherits(Client, Writable)
 
 Client.encoding = Object.freeze({
   METADATA: Symbol('metadata'),
+  METADATA_MULTIPART: Symbol('metadata_multipart'),
   TRANSACTION: Symbol('transaction'),
   SPAN: Symbol('span'),
   ERROR: Symbol('error'),
   METRICSET: Symbol('metricset')
 })
 
-function Client (opts) {
+function Client(opts) {
   if (!(this instanceof Client)) return new Client(opts)
 
   this.config(opts)
@@ -116,7 +119,7 @@ function Client (opts) {
     size: this._conf.size,
     time: this._conf.time,
     type: StreamChopper.overflow,
-    transform () {
+    transform() {
       return zlib.createGzip()
     }
   }).on('stream', onStream(this, errorproxy))
@@ -172,6 +175,7 @@ Client.prototype.config = function (opts) {
   // http request options
   this._conf.requestIntake = getIntakeRequestOptions(this._conf, this._agent)
   this._conf.requestConfig = getConfigRequestOptions(this._conf, this._agent)
+  this._conf.requestProfile = getProfileRequestOptions(this._conf, this._agent)
 
   this._conf.metadata = getMetadata(this._conf)
 
@@ -315,7 +319,7 @@ Client.prototype._writev = function (objs, cb) {
   processBatch()
 }
 
-function encodeObject (obj) {
+function encodeObject(obj) {
   return this._encode(obj.chunk, obj.encoding)
 }
 
@@ -385,6 +389,11 @@ Client.prototype._encode = function (obj, enc) {
     case Client.encoding.METADATA:
       out.metadata = truncate.metadata(obj.metadata, this._conf)
       break
+
+    case Client.encoding.METADATA_MULTIPART:
+      Object.assign(out, truncate.metadata(obj, this._conf))
+      break
+
     case Client.encoding.ERROR:
       out.error = truncate.error(obj.error, this._conf)
       break
@@ -435,6 +444,46 @@ Client.prototype.sendMetricSet = function (metricset, cb) {
   return this.write({ metricset }, Client.encoding.METRICSET, cb)
 }
 
+Client.prototype.sendProfile = function (profile, metadata, cb) {
+
+  if (typeof metadata === 'function') {
+    cb = metadata;
+    metadata = {};
+  }
+
+  if (!metadata) {
+    metadata = {}
+  }
+
+  const formData = new FormData()
+
+  formData.setBoundary('nnngggg')
+
+  console.log('sendProfile');
+
+  const submitOpts = this._conf.requestProfile
+
+  const metadataToSend = this._encode(merge({}, metadata, this._conf.metadata), Client.encoding.METADATA_MULTIPART)
+
+  formData.append('metadata', metadataToSend, { contentType: 'application/json' })
+  formData.append('profile', profile, { contentType: 'application/x-protobuf; messageType="perftools.profiles.Profile"' })
+
+  const req = formData.submit(submitOpts, (err, res) => {
+    cb(err, res)
+  })
+
+  req.on('response', (res) => {
+    let response = '';
+    res.on('data', (chunk) => {
+      response += chunk.toString()
+    })
+
+    res.on('close', () => {
+      console.log(response)
+    })
+  })
+};
+
 Client.prototype.flush = function (cb) {
   this._maybeUncork()
 
@@ -471,7 +520,7 @@ Client.prototype._destroy = function (err, cb) {
   cb(err)
 }
 
-function onStream (client, onerror) {
+function onStream(client, onerror) {
   return function (stream, next) {
     const onerrorproxy = (err) => {
       stream.removeListener('error', onerrorproxy)
@@ -611,7 +660,7 @@ Client.prototype._fetchAndEncodeMetadata = function (cb) {
   }
 }
 
-function onResult (onerror) {
+function onResult(onerror) {
   return streamToBuffer.onStream(function (err, buf, res) {
     if (err) return onerror(err)
     if (res.statusCode < 200 || res.statusCode > 299) {
@@ -620,7 +669,7 @@ function onResult (onerror) {
   })
 }
 
-function getIntakeRequestOptions (opts, agent) {
+function getIntakeRequestOptions(opts, agent) {
   const headers = getHeaders(opts)
   headers['Content-Type'] = 'application/x-ndjson'
   headers['Content-Encoding'] = 'gzip'
@@ -628,7 +677,15 @@ function getIntakeRequestOptions (opts, agent) {
   return getBasicRequestOptions('POST', '/intake/v2/events', headers, opts, agent)
 }
 
-function getConfigRequestOptions (opts, agent) {
+function getProfileRequestOptions(opts, agent) {
+  const headers = getHeaders(opts)
+
+  const path = '/intake/v2/profile'
+
+  return getBasicRequestOptions('POST', path, headers, opts, agent)
+}
+
+function getConfigRequestOptions(opts, agent) {
   const path = '/config/v1/agents?' + querystring.stringify({
     'service.name': opts.serviceName,
     'service.environment': opts.environment
@@ -639,12 +696,13 @@ function getConfigRequestOptions (opts, agent) {
   return getBasicRequestOptions('GET', path, headers, opts, agent)
 }
 
-function getBasicRequestOptions (method, defaultPath, headers, opts, agent) {
+function getBasicRequestOptions(method, defaultPath, headers, opts, agent) {
   return {
     agent: agent,
     rejectUnauthorized: opts.rejectUnauthorized !== false,
     ca: opts.serverCaCert,
     hostname: opts.serverUrl.hostname,
+    protocol: opts.serverUrl.protocol,
     port: opts.serverUrl.port,
     method,
     path: opts.serverUrl.pathname === '/' ? defaultPath : opts.serverUrl.pathname + defaultPath,
@@ -652,7 +710,7 @@ function getBasicRequestOptions (method, defaultPath, headers, opts, agent) {
   }
 }
 
-function getHeaders (opts) {
+function getHeaders(opts) {
   const headers = {}
   if (opts.secretToken) headers.Authorization = 'Bearer ' + opts.secretToken
   if (opts.apiKey) headers.Authorization = 'ApiKey ' + opts.apiKey
@@ -661,7 +719,7 @@ function getHeaders (opts) {
   return Object.assign(headers, opts.headers)
 }
 
-function getMetadata (opts) {
+function getMetadata(opts) {
   var payload = {
     service: {
       name: opts.serviceName,
@@ -737,14 +795,14 @@ function getMetadata (opts) {
   return payload
 }
 
-function destroyStream (stream) {
+function destroyStream(stream) {
   if (stream instanceof zlib.Gzip ||
-      stream instanceof zlib.Gunzip ||
-      stream instanceof zlib.Deflate ||
-      stream instanceof zlib.DeflateRaw ||
-      stream instanceof zlib.Inflate ||
-      stream instanceof zlib.InflateRaw ||
-      stream instanceof zlib.Unzip) {
+    stream instanceof zlib.Gunzip ||
+    stream instanceof zlib.Deflate ||
+    stream instanceof zlib.DeflateRaw ||
+    stream instanceof zlib.Inflate ||
+    stream instanceof zlib.InflateRaw ||
+    stream instanceof zlib.Unzip) {
     // Zlib streams doesn't have a destroy function in Node.js 6. On top of
     // that simply calling destroy on a zlib stream in Node.js 8+ will result
     // in a memory leak as the handle isn't closed (an operation normally done
@@ -773,11 +831,11 @@ function destroyStream (stream) {
   }
 }
 
-function oneOf (value, list) {
+function oneOf(value, list) {
   return list.indexOf(value) >= 0
 }
 
-function normalizeGlobalLabels (labels) {
+function normalizeGlobalLabels(labels) {
   if (!labels) return
   const result = {}
 
@@ -791,13 +849,13 @@ function normalizeGlobalLabels (labels) {
   return result
 }
 
-function getMaxAge (res) {
+function getMaxAge(res) {
   const header = res.headers['cache-control']
   const match = header && header.match(/max-age=(\d+)/)
   return parseInt(match && match[1], 10)
 }
 
-function processIntakeErrorResponse (res, buf) {
+function processIntakeErrorResponse(res, buf) {
   const err = new Error('Unexpected APM Server response')
 
   err.code = res.statusCode
