@@ -16,6 +16,7 @@ const truncate = require('./lib/truncate')
 const pkg = require('./package')
 const FormData = require('form-data')
 const merge = require('lodash/merge')
+const uuid = require('uuid');
 
 module.exports = Client
 
@@ -455,33 +456,47 @@ Client.prototype.sendProfile = function (profile, metadata, cb) {
     metadata = {}
   }
 
-  const formData = new FormData()
-
-  formData.setBoundary('nnngggg')
-
-  console.log('sendProfile');
-
   const submitOpts = this._conf.requestProfile
+
+  const formData = new FormData({
+    maxDataSize: Number.MAX_VALUE
+  })
+
+  const boundary = `MULTIPARTBOUNDARY_${uuid.v4().split('-')[0]}`
+
+  formData.setBoundary(boundary)
 
   const metadataToSend = this._encode(merge({}, metadata, this._conf.metadata), Client.encoding.METADATA_MULTIPART)
 
   formData.append('metadata', metadataToSend, { contentType: 'application/json' })
   formData.append('profile', profile, { contentType: 'application/x-protobuf; messageType="perftools.profiles.Profile"' })
 
-  const req = formData.submit(submitOpts, (err, res) => {
-    cb(err, res)
-  })
+  formData.submit(submitOpts, (err, res) => {
+    if (err) {
+      cb(err)
+      return
+    }
 
-  req.on('response', (res) => {
-    let response = '';
+    let responseBody = ''
+
     res.on('data', (chunk) => {
-      response += chunk.toString()
+      responseBody += chunk.toString()
     })
 
-    res.on('close', () => {
-      console.log(response)
+    res.on('end', () => {
+
+      if (res.statusCode >= 400) {
+        const error = new Error(responseBody)
+        error.statusCode = res.statusCode
+        cb(error)
+        return
+      }
+
+      cb(null, { statusCode: res.statusCode, body: responseBody })
+
     })
   })
+
 };
 
 Client.prototype.flush = function (cb) {
