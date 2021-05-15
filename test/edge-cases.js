@@ -1,8 +1,11 @@
 'use strict'
 
+const { exec } = require('child_process')
 const http = require('http')
+const path = require('path')
 const test = require('tape')
 const utils = require('./lib/utils')
+
 const Client = require('../')
 
 const APMServer = utils.APMServer
@@ -11,58 +14,6 @@ const assertIntakeReq = utils.assertIntakeReq
 const assertMetadata = utils.assertMetadata
 const assertEvent = utils.assertEvent
 const validOpts = utils.validOpts
-
-test('Event: close - if ndjson stream ends', function (t) {
-  t.plan(1)
-  let client
-  const server = APMServer(function (req, res) {
-    client._chopper.end()
-    setTimeout(function () {
-      // wait a little to allow close to be emitted
-      t.end()
-      server.close()
-    }, 10)
-  }).listen(function () {
-    client = new Client(validOpts({
-      serverUrl: 'http://localhost:' + server.address().port
-    }))
-
-    client.on('finish', function () {
-      t.fail('should not emit finish event')
-    })
-    client.on('close', function () {
-      t.pass('should emit close event')
-    })
-
-    client.sendSpan({ req: 1 })
-  })
-})
-
-test('Event: close - if ndjson stream is destroyed', function (t) {
-  t.plan(1)
-  let client
-  const server = APMServer(function (req, res) {
-    client._chopper.destroy()
-    setTimeout(function () {
-      // wait a little to allow close to be emitted
-      t.end()
-      server.close()
-    }, 10)
-  }).listen(function () {
-    client = new Client(validOpts({
-      serverUrl: 'http://localhost:' + server.address().port
-    }))
-
-    client.on('finish', function () {
-      t.fail('should not emit finish event')
-    })
-    client.on('close', function () {
-      t.pass('should emit close event')
-    })
-
-    client.sendSpan({ req: 1 })
-  })
-})
 
 test('Event: close - if chopper ends', function (t) {
   t.plan(1)
@@ -144,6 +95,7 @@ test('request with error - no body', function (t) {
       t.equal(err.accepted, undefined)
       t.equal(err.errors, undefined)
       t.equal(err.response, undefined)
+      client.destroy()
       server.close()
       t.end()
     })
@@ -164,6 +116,7 @@ test('request with error - non json body', function (t) {
       t.equal(err.accepted, undefined)
       t.equal(err.errors, undefined)
       t.equal(err.response, 'boom!')
+      client.destroy()
       server.close()
       t.end()
     })
@@ -185,6 +138,7 @@ test('request with error - invalid json body', function (t) {
       t.equal(err.accepted, undefined)
       t.equal(err.errors, undefined)
       t.equal(err.response, 'boom!')
+      client.destroy()
       server.close()
       t.end()
     })
@@ -207,6 +161,7 @@ test('request with error - json body without accepted or errors properties', fun
       t.equal(err.accepted, undefined)
       t.equal(err.errors, undefined)
       t.equal(err.response, body)
+      client.destroy()
       server.close()
       t.end()
     })
@@ -228,6 +183,7 @@ test('request with error - json body with accepted and errors properties', funct
       t.equal(err.accepted, 42)
       t.deepEqual(err.errors, [{ message: 'bar' }])
       t.equal(err.response, undefined)
+      client.destroy()
       server.close()
       t.end()
     })
@@ -249,6 +205,7 @@ test('request with error - json body where Content-Type contains charset', funct
       t.equal(err.accepted, 42)
       t.deepEqual(err.errors, [{ message: 'bar' }])
       t.equal(err.response, undefined)
+      client.destroy()
       server.close()
       t.end()
     })
@@ -310,29 +267,79 @@ test('socket hang up - continue with new request', function (t) {
     req.on('end', function () {
       t.pass('should end request')
       res.end()
-      server.close()
+      client.end() // cleanup 1: end the client stream so it can 'finish'
     })
   }).client(function (_client) {
     client = _client
     client.on('request-error', function (err) {
-      t.equal(err.message, 'socket hang up')
-      t.equal(err.code, 'ECONNRESET')
+      t.equal(err.message, 'socket hang up', 'got "socket hang up" request-error')
+      t.equal(err.code, 'ECONNRESET', 'request-error code is "ECONNRESET"')
       client.sendSpan({ req: 2 })
     })
     client.on('finish', function () {
       t.equal(reqs, 2, 'should emit finish after last request')
+      client.end()
+      server.close()
       t.end()
     })
     client.sendSpan({ req: 1 })
   })
 })
 
+test('intakeResTimeoutOnEnd', function (t) {
+  const server = APMServer(function (req, res) {
+    req.resume()
+  }).client({
+    intakeResTimeoutOnEnd: 500
+  }, function (client) {
+    const start = Date.now()
+    client.on('request-error', function (err) {
+      t.ok(err, 'got a request-error from the client')
+      const end = Date.now()
+      const delta = end - start
+      t.ok(delta > 400 && delta < 600, `timeout should be about 500ms, got ${delta}ms`)
+      t.equal(err.message, 'intake response timeout: APM server did not respond within 0.5s of gzip stream finish')
+      server.close()
+      t.end()
+    })
+    client.sendSpan({ foo: 42 })
+    client.end()
+  })
+})
+
+test('intakeResTimeout', function (t) {
+  const server = APMServer(function (req, res) {
+    req.resume()
+  }).client({
+    intakeResTimeout: 400
+  }, function (client) {
+    const start = Date.now()
+    client.on('request-error', function (err) {
+      t.ok(err, 'got a request-error from the client')
+      const end = Date.now()
+      const delta = end - start
+      t.ok(delta > 300 && delta < 500, `timeout should be about 400ms, got ${delta}ms`)
+      t.equal(err.message, 'intake response timeout: APM server did not respond within 0.4s of gzip stream finish')
+      server.close()
+      t.end()
+    })
+    client.sendSpan({ foo: 42 })
+    // Do *not* `client.end()` else we are testing intakeResTimeoutOnEnd.
+    client.flush()
+  })
+})
+
 test('socket timeout - server response too slow', function (t) {
   const server = APMServer(function (req, res) {
     req.resume()
-  }).client({ serverTimeout: 1000 }, function (client) {
+  }).client({
+    serverTimeout: 1000,
+    // Set the intake res timeout higher to be able to test serverTimeout.
+    intakeResTimeoutOnEnd: 5000
+  }, function (client) {
     const start = Date.now()
     client.on('request-error', function (err) {
+      t.ok(err, 'got a request-error from the client')
       const end = Date.now()
       const delta = end - start
       t.ok(delta > 1000 && delta < 2000, 'timeout should occur between 1-2 seconds')
@@ -535,7 +542,6 @@ test('client.send*() after client.destroy() should not result in error', functio
 })
 
 const dataTypes = ['span', 'transaction', 'error']
-
 dataTypes.forEach(function (dataType) {
   const sendFn = 'send' + dataType.charAt(0).toUpperCase() + dataType.substr(1)
 
@@ -560,7 +566,53 @@ dataTypes.forEach(function (dataType) {
       const obj = { foo: 42 }
       obj.bar = obj
       client[sendFn](obj)
-      client.flush()
+      client.flush(() => { client.destroy() })
+    })
+  })
+})
+
+// Ensure that the client.flush(cb) callback is called even if there are no
+// active handles -- i.e. the process is exiting. We test this out of process
+// to ensure no conflict with other tests or the test framework.
+test('client.flush callbacks must be called, even if no active handles', function (t) {
+  let theError
+
+  const server = APMServer(function (req, res) {
+    const objStream = processIntakeReq(req)
+    let n = 0
+    objStream.on('data', function (obj) {
+      if (++n === 2) {
+        theError = obj.error
+      }
+    })
+    objStream.on('end', function () {
+      res.statusCode = 202
+      res.end()
+      server.close()
+    })
+  })
+
+  server.listen(function () {
+    const url = 'http://localhost:' + server.address().port
+    const script = path.resolve(__dirname, 'lib', 'call-me-back-maybe.js')
+    const start = Date.now()
+    exec(`${process.execPath} ${script} ${url}`, function (err, stdout, stderr) {
+      if (stderr.trim()) {
+        t.comment(`stderr from ${script}:\n${stderr}`)
+      }
+      if (err) {
+        throw err
+      }
+      t.equal(stdout, 'sendCb called\nflushCb called\n',
+        'stdout shows both callbacks were called')
+      const duration = Date.now() - start
+      t.ok(duration < 1000, `should complete quickly, ie. not timeout (was: ${duration}ms)`)
+
+      t.ok(theError, `APM server got an error object from ${script}`)
+      if (theError) {
+        t.equal(theError.exception.message, 'boom', 'error message is "boom"')
+      }
+      t.end()
     })
   })
 })

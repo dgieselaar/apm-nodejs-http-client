@@ -1,6 +1,6 @@
 {
   "name": "elastic-apm-http-client",
-  "version": "9.5.1",
+  "version": "9.8.0",
   "description": "A low-level HTTP client for communicating with the Elastic APM intake API",
   "main": "index.js",
   "directories": {
@@ -9,9 +9,9 @@
   "files": [
     "lib"
   ],
+  "// scripts.test": "quoting arg to tape to avoid too long argv, let tape do globbing",
   "scripts": {
-    "coverage": "nyc report --reporter=text-lcov > coverage.lcov && codecov",
-    "test": "standard && nyc tape test/*.js"
+    "test": "standard && nyc tape \"test/*.js\""
   },
   "engines": {
     "node": "^8.6.0 || 10 || >=12"
@@ -25,13 +25,12 @@
     "fast-safe-stringify": "^2.0.7",
     "fast-stream-to-buffer": "^1.0.0",
     "form-data": "github:form-data/form-data#master",
-    "pump": "^3.0.0",
+    "object-filter-sequence": "^1.0.0",
     "readable-stream": "^3.4.0",
     "stream-chopper": "^3.0.1",
     "unicode-byte-truncate": "^1.0.0"
   },
   "devDependencies": {
-    "codecov": "^3.6.1",
     "ndjson": "^1.5.0",
     "nyc": "^14.1.1",
     "semver": "^6.3.0",

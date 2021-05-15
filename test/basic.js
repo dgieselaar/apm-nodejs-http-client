@@ -40,7 +40,7 @@ dataTypes.forEach(function (dataType) {
       })
     }).client(function (client) {
       client[sendFn]({ foo: 42 })
-      client.flush()
+      client.flush(() => { client.destroy() })
     })
   })
 
@@ -58,21 +58,24 @@ dataTypes.forEach(function (dataType) {
       })
       req.on('end', function () {
         res.end()
-        server.close()
-        t.end()
       })
     }).client(function (client) {
       let nexttick = false
       client[sendFn]({ foo: 42 }, function () {
         t.ok(nexttick, 'should call callback')
       })
-      client.flush()
+      client.flush(() => {
+        client.end()
+        server.close()
+        t.end()
+      })
       nexttick = true
     })
   })
 
   test(`client.${sendFn}() + client.end()`, function (t) {
     t.plan(assertIntakeReq.asserts + assertMetadata.asserts + assertEvent.asserts)
+    let client
     const datas = [
       assertMetadata,
       assertEvent({ [dataType]: { foo: 42 } })
@@ -86,9 +89,11 @@ dataTypes.forEach(function (dataType) {
       req.on('end', function () {
         res.end()
         server.close()
+        client.destroy()
         t.end()
       })
-    }).client(function (client) {
+    }).client(function (client_) {
+      client = client_
       client[sendFn]({ foo: 42 })
       client.end()
     })
@@ -96,6 +101,7 @@ dataTypes.forEach(function (dataType) {
 
   test(`single client.${sendFn}`, function (t) {
     t.plan(assertIntakeReq.asserts + assertMetadata.asserts + assertEvent.asserts)
+    let client
     const datas = [
       assertMetadata,
       assertEvent({ [dataType]: { foo: 42 } })
@@ -109,15 +115,18 @@ dataTypes.forEach(function (dataType) {
       req.on('end', function () {
         res.end()
         server.close()
+        client.destroy()
         t.end()
       })
-    }).client({ time: 100 }, function (client) {
+    }).client({ time: 100 }, function (client_) {
+      client = client_
       client[sendFn]({ foo: 42 })
     })
   })
 
   test(`multiple client.${sendFn} (same request)`, function (t) {
     t.plan(assertIntakeReq.asserts + assertMetadata.asserts + assertEvent.asserts * 3)
+    let client
     const datas = [
       assertMetadata,
       assertEvent({ [dataType]: { req: 1 } }),
@@ -133,9 +142,11 @@ dataTypes.forEach(function (dataType) {
       req.on('end', function () {
         res.end()
         server.close()
+        client.destroy()
         t.end()
       })
-    }).client({ time: 100 }, function (client) {
+    }).client({ time: 100 }, function (client_) {
+      client = client_
       client[sendFn]({ req: 1 })
       client[sendFn]({ req: 2 })
       client[sendFn]({ req: 3 })
@@ -174,6 +185,7 @@ dataTypes.forEach(function (dataType) {
           send()
         } else {
           server.close()
+          client.destroy()
           t.end()
         }
       })
@@ -207,8 +219,6 @@ test('client.flush(callback) - with active request', function (t) {
     })
     req.on('end', function () {
       res.end()
-      server.close()
-      t.end()
     })
   }).client({ bufferWindowTime: -1 }, function (client) {
     // Cloud metadata fetching means that a write (via `client.sendSpan()` or
@@ -223,6 +233,9 @@ test('client.flush(callback) - with active request', function (t) {
         t.equal(client._active, true, 'an outgoing HTTP request should be active')
         client.flush(function () {
           t.equal(client._active, false, 'the outgoing HTTP request should be done')
+          client.end()
+          server.close()
+          t.end()
         })
       })
     })
@@ -231,7 +244,6 @@ test('client.flush(callback) - with active request', function (t) {
 
 test('client.flush(callback) - with queued request', function (t) {
   t.plan(4 + assertIntakeReq.asserts * 2 + assertMetadata.asserts * 2)
-  let requests = 0
   const datas = [
     assertMetadata,
     { span: { req: 1, name: 'undefined', type: 'undefined' } },
@@ -248,10 +260,6 @@ test('client.flush(callback) - with queued request', function (t) {
     })
     req.on('end', function () {
       res.end()
-      if (++requests === 2) {
-        t.end()
-        server.close()
-      }
     })
   }).client({ bufferWindowTime: -1 }, function (client) {
     // Cloud metadata fetching means that a write (via `client.sendSpan()` or
@@ -267,6 +275,9 @@ test('client.flush(callback) - with queued request', function (t) {
         t.equal(client._active, true, 'an outgoing HTTP request should be active')
         client.flush(function () {
           t.equal(client._active, false, 'the outgoing HTTP request should be done')
+          client.end()
+          server.close()
+          t.end()
         })
       })
     })
@@ -300,7 +311,7 @@ test('2nd flush before 1st flush have finished', function (t) {
     client.sendSpan({ req: 1 })
     client.flush()
     client.sendSpan({ req: 2 })
-    client.flush()
+    client.flush(() => { client.destroy() })
     setTimeout(function () {
       t.equal(requestStarts, 2, 'should have received 2 requests')
       t.equal(requestEnds, 2, 'should have received 2 requests completely')
@@ -312,6 +323,7 @@ test('2nd flush before 1st flush have finished', function (t) {
 
 test('client.end(callback)', function (t) {
   t.plan(1 + assertIntakeReq.asserts + assertMetadata.asserts + assertEvent.asserts)
+  let client
   const datas = [
     assertMetadata,
     assertEvent({ span: { foo: 42 } })
@@ -325,9 +337,11 @@ test('client.end(callback)', function (t) {
     req.on('end', function () {
       res.end()
       server.close()
+      client.destroy()
       t.end()
     })
-  }).client(function (client) {
+  }).client(function (client_) {
+    client = client_
     client.sendSpan({ foo: 42 })
     client.end(function () {
       t.pass('should call callback')
@@ -337,31 +351,28 @@ test('client.end(callback)', function (t) {
 
 test('client.sent', function (t) {
   t.plan(4)
-  let client
-  let requests = 0
   const server = APMServer(function (req, res) {
+    t.comment('APM server got a request')
     req.resume()
     req.on('end', function () {
       res.end()
-      if (++requests === 2) {
-        server.close()
-        t.end()
-      }
     })
-  }).client(function (_client) {
-    client = _client
+  }).client(function (client) {
     client.sendError({ foo: 42 })
     client.sendSpan({ foo: 42 })
     client.sendTransaction({ foo: 42 })
-    t.equal(client.sent, 0, 'after 1st round of sending')
+    t.equal(client.sent, 0, 'sent=0 after 1st round of sending')
     client.flush(function () {
-      t.equal(client.sent, 3, 'after 1st flush')
+      t.equal(client.sent, 3, 'sent=3 after 1st flush')
       client.sendError({ foo: 42 })
       client.sendSpan({ foo: 42 })
       client.sendTransaction({ foo: 42 })
-      t.equal(client.sent, 3, 'after 2nd round of sending')
+      t.equal(client.sent, 3, 'sent=3 after 2nd round of sending')
       client.flush(function () {
-        t.equal(client.sent, 6, 'after 2nd flush')
+        t.equal(client.sent, 6, 'sent=6 after 2nd flush')
+        client.end()
+        server.close()
+        t.end()
       })
     })
   })
@@ -381,6 +392,7 @@ test('should not open new request until it\'s needed after flush', function (t) 
 
       if (++requests === 2) {
         server.close()
+        client.destroy()
         t.end()
       } else {
         setTimeout(sendData, 250)
@@ -412,6 +424,7 @@ test('should not open new request until it\'s needed after timeout', function (t
 
       if (++requests === 2) {
         server.close()
+        client.destroy()
         t.end()
       } else {
         setTimeout(sendData, 250)
@@ -428,7 +441,7 @@ test('should not open new request until it\'s needed after timeout', function (t
   }
 })
 
-test('cloud metadata: updateEncodedMetadata', function (t) {
+test('cloud metadata: _encodedMetadata maintains cloud info after re-config', function (t) {
   const conf = {
     agentName: 'a',
     agentVersion: 'b',
@@ -444,22 +457,33 @@ test('cloud metadata: updateEncodedMetadata', function (t) {
   t.equals(metadataPreUpdate.service.agent.version, conf.agentVersion, 'initial agent version set')
   t.ok(!metadataPreUpdate.cloud, 'no cloud metadata set initially')
 
-  // tests that cloud metadata included in the _encodedPayload
-  // is included after an update
+  // Simulate cloud metadata having been gathered.
+  client._cloudMetadata = { foo: 'bar' }
+  client._resetEncodedMetadata()
 
-  // inject our fixture
-  metadataPreUpdate.cloud = { foo: 'bar' }
-  client._encodedMetadata = JSON.stringify({ metadata: metadataPreUpdate })
+  // Ensure cloud metadata is on `_encodedMetadata`.
+  const metadataPostCloud = JSON.parse(client._encodedMetadata).metadata
+  t.equals(metadataPostCloud.service.name, conf.serviceName, 'service name still set')
+  t.equals(metadataPostCloud.service.agent.name, conf.agentName, 'agent name still set')
+  t.equals(metadataPostCloud.service.agent.version, conf.agentVersion, 'agent version still set')
+  t.ok(metadataPostCloud.cloud, 'cloud metadata set after fetch')
+  t.equals(metadataPostCloud.cloud.foo, 'bar', 'cloud metadata set after fetch')
 
-  client.updateEncodedMetadata()
+  // Simulate an update of some metadata from re-config.
+  client.config({
+    frameworkName: 'superFastify',
+    frameworkVersion: '1.0.0'
+  })
 
+  // Ensure _encodedMetadata keeps cloud info and updates appropriately.
   const metadataPostUpdate = JSON.parse(client._encodedMetadata).metadata
-  // console.log(metadataPostUpdate)
   t.equals(metadataPostUpdate.service.name, conf.serviceName, 'service name still set')
   t.equals(metadataPostUpdate.service.agent.name, conf.agentName, 'agent name still set')
   t.equals(metadataPostUpdate.service.agent.version, conf.agentVersion, 'agent version still set')
-  t.ok(metadataPostUpdate.cloud, 'cloud metadata still set after call to updateEncodedMetadata')
-  t.equals(metadataPostUpdate.cloud.foo, 'bar', 'cloud metadata "passed through" when something calls updateEncodedMetadata')
+  t.equals(metadataPostUpdate.service.framework.name, 'superFastify', 'service.framework.name properly set')
+  t.equals(metadataPostUpdate.service.framework.version, '1.0.0', 'service.framework.version properly set')
+  t.ok(metadataPostUpdate.cloud, 'cloud metadata still set after re-config')
+  t.equals(metadataPostUpdate.cloud.foo, 'bar', 'cloud metadata "passed through" after re-config')
   t.end()
 })
 

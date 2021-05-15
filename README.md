@@ -3,7 +3,6 @@
 [![npm](https://img.shields.io/npm/v/elastic-apm-http-client.svg)](https://www.npmjs.com/package/elastic-apm-http-client)
 [![Test status in GitHub Actions](https://github.com/elastic/apm-nodejs-http-client/workflows/Test/badge.svg)](https://github.com/elastic/apm-nodejs-http-client/actions)
 [![Build Status in Jenkins](https://apm-ci.elastic.co/buildStatus/icon?job=apm-agent-nodejs%2Fapm-nodejs-http-client-mbp%2Fmaster)](https://apm-ci.elastic.co/job/apm-agent-nodejs/job/apm-nodejs-http-client-mbp/job/master/)
-[![codecov](https://img.shields.io/codecov/c/github/elastic/apm-nodejs-http-client.svg)](https://codecov.io/gh/elastic/apm-nodejs-http-client)
 
 A low-level HTTP client for communicating with the Elastic APM intake
 API version 2. For support for version 1, use version 5.x of this
@@ -54,9 +53,10 @@ Server.
 
 Arguments:
 
-- `options` - An object containing config options (see below)
+- `options` - An object containing config options (see below). All options
+  are optional, except those marked "(required)".
 
-Data sent to the APM Server as part of the metadata package:
+Data sent to the APM Server as part of the [metadata object](https://www.elastic.co/guide/en/apm/server/current/metadata-api.html):
 
 - `agentName` - (required) The APM agent name
 - `agentVersion` - (required) The APM agent version
@@ -94,7 +94,7 @@ HTTP client configuration:
   sent or received on the socket for this amount of time, the request
   will be aborted. It's not recommended to set a `serverTimeout` lower
   than the `time` config option. That might result in healthy requests
-  being aborted prematurely (default: `15000` ms)
+  being aborted prematurely. (default: `15000` ms)
 - `keepAlive` - If set the `false` the client will not reuse sockets
   between requests (default: `true`)
 - `keepAliveMsecs` - When using the `keepAlive` option, specifies the
@@ -133,6 +133,25 @@ Streaming configuration:
   This config option controls the maximum size of that buffer (counted
   in number of objects). Set to `-1` for no max size (default: `50`
   objects)
+- `maxQueueSize` - The maximum number of buffered events (transactions,
+  spans, errors, metricsets). Events are buffered when the agent can't keep
+  up with sending them to the APM Server or if the APM server is down.
+  If the queue is full, events are rejected which means transactions, spans,
+  etc. will be lost. This guards the application from consuming unbounded
+  memory, possibly overusing CPU (spent on serializing events), and possibly
+  crashing in case the APM server is unavailable for a long period of time. A
+  lower value will decrease the heap overhead of the agent, while a higher
+  value makes it less likely to lose events in case of a temporary spike in
+  throughput. (default: 1024)
+- `intakeResTimeout` - The time (in milliseconds) by which a response from the
+  [APM Server events intake API](https://www.elastic.co/guide/en/apm/server/current/events-api.html)
+  is expected *after all the event data for that request has been sent*. This
+  allows a smaller timeout than `serverTimeout` to handle an APM server that
+  is accepting connections but is slow to respond. (default: `10000` ms)
+- `intakeResTimeoutOnEnd` - The same as `intakeResTimeout`, but used when
+  the client has ended, hence for the possible last request to APM server. This
+  is typically a lower value to not hang an ending process that is waiting for
+  that APM server request to complete. (default: `1000` ms)
 
 Data sanitizing configuration:
 
@@ -151,9 +170,12 @@ Data sanitizing configuration:
 
 Debug options:
 
+- `logger` - A [pino](https://getpino.io) logger to use for trace and
+  debug-level logging.
 - `payloadLogFile` - Specify a file path to which a copy of all data
   sent to the APM Server should be written. The data will be in ndjson
-  format and will be uncompressed
+  format and will be uncompressed. Note that using this option can
+  impact performance.
 
 ### Event: `config`
 
@@ -218,16 +240,17 @@ The client is not closed when the `request-error` event is emitted.
 
 ### `client.sent`
 
-An integer indicating the number of events (spans, transactions, or errors)
-sent by the client. An event is considered sent when the HTTP request
-used to transmit it have ended.
+An integer indicating the number of events (spans, transactions, errors, or
+metricsets) sent by the client. An event is considered sent when the HTTP
+request used to transmit it has ended. Note that errors in requests to APM
+server may mean this value is not the same as the number of events *accepted*
+by the APM server.
 
 ### `client.config(options)`
 
 Update the configuration given to the `Client` constructor. All
 configuration options can be updated except:
 
-- The protocol part of the `serverUrl` (`http` vs `https`)
 - `size`
 - `time`
 - `keepAlive`
@@ -235,6 +258,40 @@ configuration options can be updated except:
 - `maxSockets`
 - `maxFreeSockets`
 - `centralConfig`
+
+### `client.addMetadataFilter(fn)`
+
+Add a filter function for the ["metadata" object](https://www.elastic.co/guide/en/apm/server/current/metadata-api.html)
+sent to APM server. This will be called once at client creation, and possibly
+again later if `client.config()` is called to reconfigure the client or
+`client.addMetadataFilter(fn)` is called to add additional filters.
+
+Here is an example of a filter that removes the `metadata.process.argv` field:
+
+```js
+apm.addMetadataFilter(function dropArgv(md) {
+  if (md.process && md.process.argv) {
+    delete md.process.argv
+  }
+  return md
+})
+```
+
+It is up to the user to ensure the returned object conforms to the
+[metadata schema](https://www.elastic.co/guide/en/apm/server/current/metadata-api.html),
+otherwise APM data injest will be broken. An example of that (when used with
+the Node.js APM agent) is this in the application's log:
+
+```
+[2021-04-14T22:28:35.419Z] ERROR (elastic-apm-node): APM Server transport error (400): Unexpected APM Server response
+APM Server accepted 0 events in the last request
+Error: validation error: 'metadata' required
+  Document: {"metadata":null}
+```
+
+See the [APM Agent `addMetadataFilter` documentation](https://www.elastic.co/guide/en/apm/agent/nodejs/current/agent-api.html#apm-add-metadata-filter)
+for further details.
+
 
 ### `client.sendSpan(span[, callback])`
 
