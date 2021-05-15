@@ -7,7 +7,7 @@ const http = require('http')
 const https = require('https')
 const util = require('util')
 const os = require('os')
-const { URL } = require('url')
+const { URL, format } = require('url')
 const zlib = require('zlib')
 
 const Filters = require('object-filter-sequence')
@@ -22,7 +22,7 @@ const ndjson = require('./lib/ndjson')
 const { NoopLogger } = require('./lib/logging')
 const truncate = require('./lib/truncate')
 const pkg = require('./package')
-const FormData = require('form-data')
+const needle = require('needle')
 const merge = require('lodash/merge')
 const uuid = require('uuid');
 
@@ -593,44 +593,38 @@ Client.prototype.sendProfile = function (profile, metadata, cb) {
 
   const submitOpts = this._conf.requestProfile
 
-  const formData = new FormData({
-    maxDataSize: Number.MAX_VALUE
-  })
-
-  const boundary = `MULTIPARTBOUNDARY_${uuid.v4().split('-')[0]}`
-
-  formData.setBoundary(boundary)
-
   const metadataToSend = this._encode(merge({}, metadata, this._conf.metadata), Client.encoding.METADATA_MULTIPART)
 
-  formData.append('metadata', metadataToSend, { contentType: 'application/json' })
-  formData.append('profile', profile, { contentType: 'application/x-protobuf; messageType="perftools.profiles.Profile"' })
+  const url = format({
+    ...submitOpts,
+    pathname: submitOpts.path,
+  })
 
-  formData.submit(submitOpts, (err, res) => {
+  needle.post(url, {
+    metadata: {
+      value: metadataToSend,
+      content_type: 'application/json',
+    },
+    profile: {
+      buffer: profile,
+      content_type: 'application/x-protobuf; messageType="perftools.profiles.Profile"'
+    }
+  }, { headers: submitOpts.headers, multipart: true }, ( err, res, body ) => {
+
     if (err) {
       cb(err)
+      return;
+    }
+    if (res.statusCode >= 400) {
+      const error = new Error(body)
+      error.statusCode = res.statusCode
+      cb(error)
       return
     }
 
-    let responseBody = ''
-
-    res.on('data', (chunk) => {
-      responseBody += chunk.toString()
-    })
-
-    res.on('end', () => {
-
-      if (res.statusCode >= 400) {
-        const error = new Error(responseBody)
-        error.statusCode = res.statusCode
-        cb(error)
-        return
-      }
-
-      cb(null, { statusCode: res.statusCode, body: responseBody })
-
-    })
+    cb(null, { statusCode: res.statusCode, body: body })
   })
+  
 
 };
 
